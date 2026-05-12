@@ -1,0 +1,32 @@
+{
+    "experiment_name": "exp_benchmark",
+    "config": {
+        "experiment_name": "exp_benchmark",
+        "env": {
+            "horizon": 128,
+            "execution_capacity": 100,
+            "arrival_scale": 0.1,
+            "target_gas": 15000000,
+            "safety_ratio": 0.2
+        },
+        "state": {
+            "num_lags": 5
+        },
+        "rl": {
+            "gamma": 0.99,
+            "urgency_beta": 0.1,
+            "deadline_penalty": 10.0
+        }
+    },
+    "normalization_bounds": {
+        "max_log_fee": 27.439275372428188,
+        "min_log_fee": 15.979277737847283,
+        "max_volatility": 1.3624268036792535,
+        "max_queue": 849
+    },
+    "dataset_stats": {
+        "train_rows": 13785984,
+        "val_rows": 861568,
+        "test_rows": 861568
+    }
+}

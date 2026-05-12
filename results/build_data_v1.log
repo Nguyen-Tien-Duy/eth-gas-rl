@@ -1,0 +1,40 @@
+nohup: ignoring input
+=== Building Dataset for Experiment: exp_benchmark ===
+
+--- Processing data_train.parquet ---
+Data loaded: 6,893,096 rows.
+Computing fundamental features with Numba Extreme Optimization...
+Computing Global Gas Reference (Window=128)...
+Extracting empirical bounds for normalization from TRAIN set...
+Simulating queue with C_cap=100, Arrival_Scale=0.1...
+Generating Overlapping Episodes (Stride=64) for Training...
+Total Episodes to solve: 107703 (Mix: {np.str_('expert'): np.int64(43371), np.str_('heuristic'): np.int64(21273), np.str_('noisy'): np.int64(32190), np.str_('random'): np.int64(10869)})
+  0%|          | 0/107703 [00:00<?, ?it/s]  0%|          | 36/107703 [00:00<06:30, 275.47it/s]  0%|          | 68/107703 [00:00<06:59, 256.46it/s]  0%|          | 95/107703 [00:00<06:52, 260.85it/s]  0%|          | 122/107703 [00:00<07:35, 236.30it/s]  0%|          | 147/107703 [00:00<07:48, 229.40it/s]  0%|          | 179/107703 [00:00<07:11, 249.08it/s]  0%|          | 205/107703 [00:00<07:13, 247.80it/s]  0%|          | 230/107703 [00:00<07:40, 233.28it/s]  0%|          | 254/107703 [00:01<07:53, 226.73it/s]  0%|          | 277/107703 [00:01<08:17, 215.75it/s]  0%|          | 301/107703 [00:01<08:18, 215.59it/s]  0%|          | 325/107703 [00:01<08:07, 220.36it/s]  0%|          | 363/107703 [00:01<07:06, 251.88it/s]  0%|          | 389/107703 [00:01<07:24, 241.24it/s]  0%|          | 414/107703 [00:01<10:11, 175.47it/s]  0%|          | 435/107703 [00:02<08:18, 215.38it/s]
+Traceback (most recent call last):
+  File "/mnt/WindowsD/Reinforcement Learning/labs/eth-gas-rl/src/builder.py", line 377, in <module>
+    build_dataset(args.config, args.train, args.val, args.test)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/WindowsD/Reinforcement Learning/labs/eth-gas-rl/src/builder.py", line 337, in build_dataset
+    train_df, bounds = process_single_file(train_path, config, is_train=True)
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/WindowsD/Reinforcement Learning/labs/eth-gas-rl/src/builder.py", line 291, in process_single_file
+    for i, (opt_n, opt_q, total_reward, gap) in enumerate(tqdm(executor.map(_oracle_worker, tasks), total=len(tasks))):
+                                                ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/WindowsD/Reinforcement Learning/labs/venv/lib/python3.14/site-packages/tqdm/std.py", line 1181, in __iter__
+    for obj in iterable:
+               ^^^^^^^^
+  File "/usr/lib/python3.14/concurrent/futures/process.py", line 617, in _chain_from_iterable_of_lists
+    for element in iterable:
+                   ^^^^^^^^
+  File "/usr/lib/python3.14/concurrent/futures/_base.py", line 639, in result_iterator
+    yield _result_or_cancel(fs.pop())
+          ~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "/usr/lib/python3.14/concurrent/futures/_base.py", line 311, in _result_or_cancel
+    return fut.result(timeout)
+           ~~~~~~~~~~^^^^^^^^^
+  File "/usr/lib/python3.14/concurrent/futures/_base.py", line 443, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.14/concurrent/futures/_base.py", line 395, in __get_result
+    raise self._exception
+concurrent.futures.process.BrokenProcessPool: A process in the process pool was terminated abruptly while the future was running or pending.
