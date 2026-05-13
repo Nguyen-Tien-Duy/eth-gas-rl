@@ -9,6 +9,7 @@ import wandb
 from tqdm import tqdm
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+import time
 
 # Add project root to path so we can import from src
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -133,10 +134,37 @@ def _train_one_epoch(algo, train_loader, algo_name: str, epoch: int, is_ddp: boo
         train_iter = tqdm(train_loader, desc=f"{algo_name.upper()} | Epoch {epoch+1}")
 
     metrics_list = []
+    processed = 0
+    start_ts = time.time()
     for batch in train_iter:
         metrics = algo.update(batch)
+        # count samples in this batch (observations first dim)
+        try:
+            batch_n = int(batch['observations'].shape[0])
+        except Exception:
+            batch_n = 0
+        processed += batch_n
         if is_main:
             metrics_list.append(metrics)
+
+    elapsed = max(1e-6, time.time() - start_ts)
+    local_sps = processed / elapsed
+    # If distributed, estimate global samples/sec by multiplying by world size
+    if is_ddp and dist.is_initialized():
+        try:
+            world_size = dist.get_world_size()
+        except Exception:
+            world_size = 1
+    else:
+        world_size = 1
+
+    global_sps_est = local_sps * world_size
+    if is_main:
+        print(
+            f"[PERF] Epoch {epoch+1}: processed={processed} samples, "
+            f"local_sps={local_sps:.2f} samples/s, approx_global_sps={global_sps_est:.2f} samples/s"
+        )
+
     return _aggregate_metrics(metrics_list)
 
 
@@ -362,7 +390,7 @@ def train():
     parser.add_argument("--config", type=str, default="configs/exp_benchmark.yaml")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--patience", type=int, default=15)
-    parser.add_argument("--batch_size", type=int, default=1024)
+    parser.add_argument("--batch_size", type=int, default=2048)
     parser.add_argument("--eval_episodes", type=int, default=100)
     parser.add_argument("--no_amp", action="store_true", help="Disable AMP (autocast + GradScaler)")
     args = parser.parse_args()
