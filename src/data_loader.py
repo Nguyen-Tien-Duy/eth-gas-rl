@@ -3,8 +3,10 @@ import pandas as pd
 import numpy as np
 import json
 import gc
+import os
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 class GasOfflineDataset(Dataset):
     """
@@ -14,7 +16,7 @@ class GasOfflineDataset(Dataset):
         self.parquet_path = parquet_path
         self.context_length = context_length
         
-        with open(metadata_path, 'r') as f:
+        with open(metadata_path, 'r', encoding='utf-8') as f:
             self.metadata = json.load(f)
         
         self.bounds = self.metadata['normalization_bounds']
@@ -93,7 +95,43 @@ class GasOfflineDataset(Dataset):
             'terminals': torch.tensor([d])
         }
 
-def get_offline_loader(parquet_path, metadata_path, batch_size=256, shuffle=True):
+def get_offline_loader(
+    parquet_path,
+    metadata_path,
+    batch_size=256,
+    shuffle=True,
+    num_workers=None,
+    distributed=False,
+    rank=0,
+    world_size=1,
+    drop_last=True,
+):
     dataset = GasOfflineDataset(parquet_path, metadata_path)
-    # Optimized for 4-core CPU, using 2 workers for data prep
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=2, pin_memory=True)
+
+    if num_workers is None:
+        # A safe default for Kaggle/Colab-like environments
+        cpu = os.cpu_count() or 2
+        num_workers = min(4, max(1, cpu // max(1, world_size)))
+
+    sampler = None
+    if distributed:
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=shuffle,
+            drop_last=drop_last,
+        )
+
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        shuffle=(shuffle and sampler is None),
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=drop_last,
+    )
+    if num_workers > 0:
+        loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
+
+    return DataLoader(dataset, **loader_kwargs)
