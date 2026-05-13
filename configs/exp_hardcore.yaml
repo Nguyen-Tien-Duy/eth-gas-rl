@@ -2,9 +2,8 @@ experiment_name: "exp_hardcore"
 
 env:
   horizon: 128
-  execution_capacity: 50    # Bóp nghẹt tài nguyên
+  execution_capacity: 50   
   arrival_scale: 0.1
-  target_gas: 15000000
   safety_ratio: 0.2
 
 state:

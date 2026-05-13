@@ -31,7 +31,7 @@ def _compute_features_numba(log_fee, gas_used, target_gas, window_size, num_lags
     
     # Calculate returns and utilization
     for i in prange(n):
-        utilization[i] = gas_used[i] / target_gas
+        utilization[i] = gas_used[i] / target_gas[i]
         if i > 0:
             returns[i] = log_fee[i] - log_fee[i-1]
             
@@ -164,7 +164,7 @@ def _oracle_worker(args):
     overhead_cost = (c_base / 1e9) * gas_prices * (n_final > 0.5)
     R_eff = (efficiency_savings - overhead_cost) / s_g
     
-    # 2. Urgency Tier: Penalty for each block rác đọng lại (Pre-arrivals)
+    # 2. Urgency Tier: Penalty for each block (Pre-arrivals)
     remaining_q_instant = q_traj - n_final
     time_ratio = np.arange(H) / float(H)
     R_urg = beta * remaining_q_instant * np.exp(alpha * (1.0 - time_ratio))
@@ -193,7 +193,7 @@ def process_single_file(file_path, config, is_train=False):
     print("Computing fundamental features with Numba Extreme Optimization...")
     log_fee = np.log(df['base_fee_per_gas'].values)
     gas_used = df['gas_used'].values
-    target_gas = float(config['env']['target_gas'])
+    target_gas = df['gas_limit'].values / 2.0 # 50% of gas limit
     num_lags = int(config['state']['num_lags'])
     window_size = 20
     
@@ -313,6 +313,7 @@ def process_single_file(file_path, config, is_train=False):
     final_df['reward'] = rewards_flat
     final_df['oracle_gap'] = gaps_flat
     final_df['terminal'] = terminals_flat
+    final_df['time_ratio'] = (final_df.groupby('episode_id').cumcount() / (H - 1)).astype(np.float32)
     
     # Print Research Stats
     expert_gaps = gaps_flat[episode_ids_flat % 1 == 0] # Filter only relevant rows if needed

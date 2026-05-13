@@ -1,0 +1,6 @@
+**/**.parquet
+**/**.png
+**/wandb/**
+**/**__pycache__/
+**/**.pt
+**/**.out

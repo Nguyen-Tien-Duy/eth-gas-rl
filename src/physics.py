@@ -24,4 +24,29 @@ def calculate_next_base_fee(current_base_fee: float, gas_used: int, target_gas: 
     return max(0.000001, next_fee)
     
 
+@njit
+def compute_reward_numba(n_t, q_t, gas_price, gas_ref, c_base, beta, alpha, time_ratio):
+    """
+    Ultra-fast Reward Calculation using Numba.
+    Returns: reward, savings, fixed_cost, urgency
+    """
+    # 1. Efficiency
+    savings = n_t * (gas_ref - gas_price)
+    fixed_cost = (c_base / 1e9) * gas_price * (n_t > 0.5)
+    r_eff = savings - fixed_cost
     
+    # 2. Urgency
+    # q_t here is the queue AFTER action n_t has been taken
+    r_urg = q_t * beta * np.exp(alpha * (1.0 - time_ratio))
+    
+    reward = (r_eff - r_urg) / 100.0
+    return reward
+
+@njit
+def step_physics_numba(q_current, n_action, arrival):
+    """
+    Mass conservation: q_next = q_current - n_action + arrival
+    """
+    n_clamped = min(n_action, q_current)
+    q_next = q_current - n_clamped + arrival
+    return q_next, n_clamped
