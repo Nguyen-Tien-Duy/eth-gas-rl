@@ -2,7 +2,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import json
-from src.physics import calculate_gas_used, calculate_next_base_fee, compute_reward_numba, step_physics_numba
+from src.physics import compute_reward_numba, step_physics_numba
 
 class EthGasEnv(gym.Env):
     """
@@ -24,9 +24,9 @@ class EthGasEnv(gym.Env):
         # Action: Percentage of current queue to execute [0, 1]
         self.action_space = spaces.Box(low=0, high=1.0, shape=(1,), dtype=np.float32)
         
-        # Observation: [Queue, Current_Gas, Lags..., Time_Ratio]
+        # Observation: [Queue, Current_Gas, Volatility, Lags..., Time_Ratio]
         self.num_lags = config.get('state', {}).get('num_lags', 5)
-        obs_dim = 1 + 1 + self.num_lags + 1 
+        obs_dim = 1 + 1 + 1 + self.num_lags + 1
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
         
         # Cache params for Numba
@@ -36,9 +36,16 @@ class EthGasEnv(gym.Env):
         
         # Load Normalization Stats
         metadata_path = f"data/processed/{config['experiment_name']}/metadata.json"
-        with open(metadata_path, 'r') as f:
+        with open(metadata_path, 'r', encoding='utf-8') as f:
             meta = json.load(f)
         self.bounds = meta['normalization_bounds']
+
+        # Placeholders for attributes initialized during reset()
+        self.target_ep = None
+        self.ep_data = None
+        self.gas_prices = None
+        self.arrivals = None
+        self.gas_ref = None
         
         # State variables
         self.trace_df = trace_df
@@ -48,18 +55,42 @@ class EthGasEnv(gym.Env):
         
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        
+
+        options = options or {}
+        requested_ep_id = options.get('episode_id', None)
+
         if self.trace_df is not None:
             ep_ids = self.trace_df['episode_id'].unique()
-            self.target_ep = np.random.choice(ep_ids)
-            self.ep_data = self.trace_df[self.trace_df['episode_id'] == self.target_ep].reset_index()
-            
+
+            if requested_ep_id is None:
+                # IMPORTANT: use Gymnasium RNG so reset(seed=...) is reproducible.
+                requested_ep_id = int(self.np_random.choice(ep_ids))
+            else:
+                requested_ep_id = int(requested_ep_id)
+
+            if requested_ep_id not in set(ep_ids.tolist() if hasattr(ep_ids, 'tolist') else list(ep_ids)):
+                raise ValueError(f"episode_id={requested_ep_id} not found in trace_df")
+
+            self.target_ep = requested_ep_id
+            self.ep_data = self.trace_df[self.trace_df['episode_id'] == self.target_ep].reset_index(drop=True)
+
+            # Ensure episode length matches horizon
+            if len(self.ep_data) < self.H:
+                raise ValueError(
+                    f"Episode {self.target_ep} length {len(self.ep_data)} < horizon {self.H}. "
+                    "Rebuild dataset with disjoint episodes or adjust horizon."
+                )
+            if len(self.ep_data) > self.H:
+                self.ep_data = self.ep_data.iloc[: self.H].reset_index(drop=True)
+
             self.gas_prices = self.ep_data['base_fee_per_gas'].values / 1e9
-            self.arrivals = (self.ep_data['transaction_count'].values * self.env_config.get('arrival_scale', 0.1)).astype(np.int64)
+            self.arrivals = (
+                self.ep_data['transaction_count'].values * self.env_config.get('arrival_scale', 0.1)
+            ).astype(np.int64)
             self.gas_ref = self.ep_data['gas_reference'].values / 1e9
         else:
-            self.gas_prices = np.full(self.H, 20.0) 
-            self.arrivals = np.random.poisson(10, self.H)
+            self.gas_prices = np.full(self.H, 20.0)
+            self.arrivals = self.np_random.poisson(10, self.H)
             self.gas_ref = np.full(self.H, 20.0)
 
         self.current_step = 0
@@ -140,4 +171,9 @@ class EthGasEnv(gym.Env):
         return self._get_obs() if not done else np.zeros(self.observation_space.shape), reward, done, False, info
 
     def render(self):
-        pass
+        """No-op render.
+
+        This environment is intended for offline training/evaluation where
+        rendering is not required.
+        """
+        return None
