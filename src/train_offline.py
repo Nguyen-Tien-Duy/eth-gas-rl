@@ -398,7 +398,7 @@ def train():
     is_ddp, local_rank, rank, world_size, is_main = _setup_distributed()
 
     # Avoid CPU thread oversubscription under DDP
-    base_threads = 4
+    base_threads = os.cpu_count() // 2
     threads = max(1, base_threads // max(1, world_size))
     torch.set_num_threads(threads)
     torch.set_num_interop_threads(threads)

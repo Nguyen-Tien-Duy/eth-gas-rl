@@ -100,7 +100,7 @@ def get_offline_loader(
     metadata_path,
     batch_size=256,
     shuffle=True,
-    num_workers=None,
+    num_workers=1,
     distributed=False,
     rank=0,
     world_size=1,
