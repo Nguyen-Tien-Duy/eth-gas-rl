@@ -22,46 +22,46 @@ def _update_cql_jit(agent, actor_state, critic_state, target_critic_params, batc
         q1, q2 = critic_state.apply_fn({'params': c_params}, obs, actions)
         
         # Standard TD Error
-        # Target Q: r + gamma * min(Q1_target(s', pi(s')), Q2_target(s', pi(s')))
-        next_actions = actor_state.apply_fn({'params': actor_state.params}, next_obs)
+        alpha_next, beta_next = actor_state.apply_fn({'params': actor_state.params}, next_obs)
+        next_actions = alpha_next / (alpha_next + beta_next)
+        
         target_q1, target_q2 = critic_state.apply_fn({'params': target_critic_params}, next_obs, next_actions)
         target_q = rewards + agent.discount * masks * jnp.minimum(target_q1, target_q2)
         
         td_loss = ((q1 - target_q)**2 + (q2 - target_q)**2).mean()
         
-        # CQL Penalty: logsumexp(Q) - E[Q_dataset]
-        # For continuous actions, we sample random actions to approximate logsumexp
-        key_sample = jax.random.PRNGKey(0) # In practice, use dynamic key
+        # CQL Penalty
         random_actions = jax.random.uniform(key, (obs.shape[0], 10, 1), minval=0.0, maxval=1.0)
+        obs_tiled = jnp.tile(jnp.expand_dims(obs, 1), (1, 10, 1))
         
-        # Reshape obs for broadcasting: (batch, 1, dim)
-        obs_expanded = jnp.expand_dims(obs, 1)
-        obs_tiled = jnp.tile(obs_expanded, (1, 10, 1))
+        q1_rand, q2_rand = critic_state.apply_fn({'params': c_params}, 
+                                               obs_tiled.reshape(-1, obs.shape[-1]), 
+                                               random_actions.reshape(-1, 1))
         
-        # Flatten for critic call
-        obs_flat = obs_tiled.reshape(-1, obs.shape[-1])
-        act_flat = random_actions.reshape(-1, 1)
-        
-        q1_rand, q2_rand = critic_state.apply_fn({'params': c_params}, obs_flat, act_flat)
-        q1_rand = q1_rand.reshape(obs.shape[0], 10)
-        q2_rand = q2_rand.reshape(obs.shape[0], 10)
-        
-        cql_loss1 = jax.nn.logsumexp(q1_rand, axis=1).mean() - q1.mean()
-        cql_loss2 = jax.nn.logsumexp(q2_rand, axis=1).mean() - q2.mean()
+        cql_loss1 = jax.nn.logsumexp(q1_rand.reshape(obs.shape[0], 10), axis=1).mean() - q1.mean()
+        cql_loss2 = jax.nn.logsumexp(q2_rand.reshape(obs.shape[0], 10), axis=1).mean() - q2.mean()
         
         return td_loss + agent.cql_alpha * (cql_loss1 + cql_loss2)
 
     q_loss, q_grads = jax.value_and_grad(critic_loss_fn)(critic_state.params)
     critic_state = critic_state.apply_gradients(grads=q_grads)
 
-    # 2. Actor Update (Simple Behavioral Cloning or DPG)
+    # 2. Actor Update (Maximize Q + BC Log-Prob)
     def actor_loss_fn(a_params):
-        mu = actor_state.apply_fn({'params': a_params}, obs)
-        # In CQL, we usually use DPG or BC. Let's use weighted BC for simplicity here
-        # or just DPG: maximize Q(s, pi(s))
+        alpha, beta = actor_state.apply_fn({'params': a_params}, obs)
+        mu = alpha / (alpha + beta)
+        
         q1, q2 = critic_state.apply_fn({'params': critic_state.params}, obs, mu)
         q = jnp.minimum(q1, q2)
-        return -q.mean() + ((mu - actions)**2).mean() * 0.5 # Add BC term for stability
+        
+        # Beta Log-Prob for BC
+        eps = 1e-6
+        actions_clipped = jnp.clip(actions, eps, 1.0 - eps)
+        log_prob = (alpha - 1.0) * jnp.log(actions_clipped) + \
+                   (beta - 1.0) * jnp.log(1.0 - actions_clipped) - \
+                   (jax.scipy.special.gammaln(alpha) + jax.scipy.special.gammaln(beta) - jax.scipy.special.gammaln(alpha + beta))
+        
+        return -q.mean() - 0.5 * log_prob.mean()
 
     a_loss, a_grads = jax.value_and_grad(actor_loss_fn)(actor_state.params)
     actor_state = actor_state.apply_gradients(grads=a_grads)
@@ -131,3 +131,15 @@ class CQLAgent:
             self.actor_state, self.critic_state, self.target_critic_params, metrics = \
                 _update_cql_jit(self, self.actor_state, self.critic_state, self.target_critic_params, batch, update_key)
             return metrics
+
+    def select_action(self, observations):
+        state = self.actor_state
+        if self.n_devices > 1:
+            from flax.training import common_utils
+            state = common_utils.unreplicate(state)
+            
+        if observations.ndim == 1:
+            observations = observations[None, ...]
+            
+        alpha, beta = state.apply_fn({'params': state.params}, observations)
+        return (alpha / (alpha + beta))[0]

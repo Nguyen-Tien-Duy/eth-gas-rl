@@ -19,8 +19,8 @@ def load_config(config_path):
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
-@njit(parallel=True)
-def _compute_features_numba(log_fee, gas_used, target_gas, window_size, num_lags):
+@njit
+def _compute_features_numba(log_fee, gas_used, target_gas, tx_count, window_size, num_lags):
     n = len(log_fee)
     
     # Pre-allocate arrays
@@ -29,11 +29,17 @@ def _compute_features_numba(log_fee, gas_used, target_gas, window_size, num_lags
     utilization = np.zeros(n)
     lags = np.zeros((n, num_lags))
     
+    # NEW 14-D Features
+    acceleration = np.zeros(n)
+    surprise = np.zeros(n)
+    backlog_pressure = np.zeros(n)
+    
     # Calculate returns and utilization
-    for i in prange(n):
+    for i in range(n):
         utilization[i] = gas_used[i] / target_gas[i]
         if i > 0:
             returns[i] = log_fee[i] - log_fee[i-1]
+            acceleration[i] = returns[i] - returns[i-1]
             
     # Calculate rolling std and lags
     for i in range(n):
@@ -44,23 +50,43 @@ def _compute_features_numba(log_fee, gas_used, target_gas, window_size, num_lags
             else:
                 lags[i, j] = log_fee[0] # Pad with first value
                 
-        # Rolling Volatility (Standard Deviation of returns)
+        # Rolling Volatility and Surprise
         if i >= window_size - 1:
-            window_sum = 0.0
-            window_sq_sum = 0.0
+            window_sum_ret = 0.0
+            window_sq_sum_ret = 0.0
+            window_sum_tx = 0.0
+            window_sq_sum_tx = 0.0
             for k in range(i - window_size + 1, i + 1):
-                val = returns[k]
-                window_sum += val
-                window_sq_sum += val * val
+                val_ret = returns[k]
+                window_sum_ret += val_ret
+                window_sq_sum_ret += val_ret * val_ret
+                
+                val_tx = tx_count[k]
+                window_sum_tx += val_tx
+                window_sq_sum_tx += val_tx * val_tx
             
-            mean = window_sum / window_size
-            variance = (window_sq_sum / window_size) - (mean * mean)
-            if variance > 0:
-                volatility[i] = math.sqrt(variance)
+            mean_ret = window_sum_ret / window_size
+            variance_ret = (window_sq_sum_ret / window_size) - (mean_ret * mean_ret)
+            if variance_ret > 0:
+                volatility[i] = math.sqrt(variance_ret)
             else:
                 volatility[i] = 0.0
                 
-    return returns, volatility, utilization, lags
+            mean_tx = window_sum_tx / window_size
+            variance_tx = (window_sq_sum_tx / window_size) - (mean_tx * mean_tx)
+            std_tx = math.sqrt(variance_tx) if variance_tx > 0 else 1.0
+            surprise[i] = (tx_count[i] - mean_tx) / std_tx
+        else:
+            volatility[i] = 0.0
+            surprise[i] = 0.0
+            
+        # Backlog Pressure (AR model)
+        if i > 0:
+            backlog_pressure[i] = max(0.0, 0.95 * backlog_pressure[i-1] + 0.3 * utilization[i] + 0.2 * surprise[i])
+        else:
+            backlog_pressure[i] = 0.0
+                
+    return returns, volatility, utilization, lags, acceleration, surprise, backlog_pressure
 
 @njit
 def _simulate_queue_numba(arrivals, capacity):
@@ -154,29 +180,28 @@ def _oracle_worker(args):
         q_current = q_traj[-1] - n_final[-1] + arrivals[-1]
         
     # ==========================================
-    # COMPUTE 3-TIER REWARD (Airtight Version)
+    # COMPUTE 3-TIER REWARD (Report-Consistent Version)
     # ==========================================
-    s_g = 10.0 
-    reward_scale = 100.0
+    c_mar = 15000.0
+    sigma = 1e9
     
     # 1. Efficiency Tier: Rewards for executing at low gas prices
-    efficiency_savings = n_final * (gas_ref - gas_prices)
-    overhead_cost = (c_base / 1e9) * gas_prices * (n_final > 0.5)
-    R_eff = (efficiency_savings - overhead_cost) / s_g
+    # Formula: (n * gas_ref - (c_base + c_mar * n) * gas_prices) / sigma
+    execution_cost = (c_base * (n_final > 0.5) + c_mar * n_final) * gas_prices
+    r_eff = (n_final * gas_ref - execution_cost) / sigma
     
-    # 2. Urgency Tier: Penalty for each block (Pre-arrivals)
+    # 2. Urgency Tier: Penalty INCREASES over time (Corrected)
     remaining_q_instant = q_traj - n_final
     time_ratio = np.arange(H) / float(H)
-    R_urg = beta * remaining_q_instant * np.exp(alpha * (1.0 - time_ratio))
+    r_urg = (beta / sigma) * remaining_q_instant * np.exp(alpha * time_ratio)
     
-    # 3. Catastrophe Tier: Penalty for failure to clear mempool by deadline
-    # We penalize the TRUE final state after the last block's arrivals (Q_H)
+    # 3. Catastrophe Tier: Final leftover penalty
     final_leftover = q_current 
-    R_cat = np.zeros(H, dtype=np.float32)
-    R_cat[-1] = lambda_d * np.maximum(0.0, final_leftover)
+    r_cat = np.zeros(H, dtype=np.float32)
+    r_cat[-1] = (lambda_d / sigma) * np.maximum(0.0, final_leftover)
     
     # Total Reward
-    total_reward = (R_eff - R_urg - R_cat) / reward_scale
+    total_reward = r_eff - r_urg - r_cat
     
     return n_final, q_traj, total_reward, gap
 
@@ -196,13 +221,17 @@ def process_single_file(file_path, config, is_train=False):
     target_gas = df['gas_limit'].values / 2.0 # 50% of gas limit
     num_lags = int(config['state']['num_lags'])
     window_size = 20
+    tx_count = df['transaction_count'].values
     
-    returns, volatility, utilization, lags = _compute_features_numba(
-        log_fee, gas_used, target_gas, window_size, num_lags
+    returns, volatility, utilization, lags, acceleration, surprise, backlog_pressure = _compute_features_numba(
+        log_fee, gas_used, target_gas, tx_count, window_size, num_lags
     )
     
     df['log_fee'] = log_fee
-    df['returns'] = returns
+    df['momentum'] = returns
+    df['acceleration'] = acceleration
+    df['surprise'] = surprise
+    df['backlog_pressure'] = backlog_pressure
     df['volatility'] = volatility
     df['utilization'] = utilization
     for j in range(num_lags):
@@ -225,11 +254,28 @@ def process_single_file(file_path, config, is_train=False):
         min_gas_log = float(df['log_fee'].min())
         max_volatility = float(df['volatility'].max())
         max_queue = simulate_queue_to_find_max(df, c_cap, a_scale)
+        
+        # New Feature Bounds
+        max_momentum = float(df['momentum'].max())
+        min_momentum = float(df['momentum'].min())
+        max_acceleration = float(df['acceleration'].max())
+        min_acceleration = float(df['acceleration'].min())
+        max_surprise = float(df['surprise'].max())
+        min_surprise = float(df['surprise'].min())
+        max_backlog_pressure = float(df['backlog_pressure'].max())
+        
         bounds = {
             "max_log_fee": max_gas_log,
             "min_log_fee": min_gas_log,
             "max_volatility": max_volatility,
-            "max_queue": int(max_queue)
+            "max_queue": int(max_queue),
+            "max_momentum": max_momentum,
+            "min_momentum": min_momentum,
+            "max_acceleration": max_acceleration,
+            "min_acceleration": min_acceleration,
+            "max_surprise": max_surprise,
+            "min_surprise": min_surprise,
+            "max_backlog_pressure": max_backlog_pressure
         }
     
     # 3. HINDSIGHT LABELING VIA MILP ORACLE

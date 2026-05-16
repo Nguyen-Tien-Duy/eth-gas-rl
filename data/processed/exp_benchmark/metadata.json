@@ -6,7 +6,9 @@
             "horizon": 128,
             "execution_capacity": 100,
             "arrival_scale": 0.1,
-            "safety_ratio": 0.2
+            "safety_ratio": 0.2,
+            "C_base": 21000,
+            "C_mar": 15000
         },
         "state": {
             "num_lags": 5
@@ -20,8 +22,9 @@
                 "bcq"
             ],
             "gamma": 0.99,
-            "urgency_beta": 0.1,
-            "deadline_penalty": 100.0,
+            "urgency_beta": 100.0,
+            "urgency_alpha": 3.0,
+            "deadline_penalty": 5000000000.0,
             "iql_expectile": 0.7,
             "iql_beta": 3.0,
             "cql_alpha": 1.0,
@@ -34,7 +37,14 @@
         "max_log_fee": 27.439275372428188,
         "min_log_fee": 15.979277737847283,
         "max_volatility": 1.3624268036792535,
-        "max_queue": 849
+        "max_queue": 849,
+        "max_momentum": 6.234010530958113,
+        "min_momentum": -5.098539834849184,
+        "max_acceleration": 6.216339245511264,
+        "min_acceleration": -6.269171824023033,
+        "max_surprise": 4.352418499517484,
+        "min_surprise": -4.076918993220032,
+        "max_backlog_pressure": 13.45829201330593
     },
     "dataset_stats": {
         "train_rows": 13785984,

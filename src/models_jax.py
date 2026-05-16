@@ -41,7 +41,7 @@ class ValueNet(nn.Module):
         return v
 
 class Actor(nn.Module):
-    """Policy network (Deterministic for Gas RL)."""
+    """Policy network using Beta Distribution to handle bimodal actions."""
     hidden_dims: Sequence[int]
     action_dim: int = 1
 
@@ -49,11 +49,20 @@ class Actor(nn.Module):
     def __call__(self, observations):
         x = MLP(self.hidden_dims)(observations)
         x = nn.relu(x)
-        # Action is [0, 1] for % of queue
-        mu = nn.Dense(self.action_dim)(x)
-        return nn.sigmoid(mu)
+        
+        # Output alpha and beta parameters
+        # Use softplus to ensure they are positive.
+        # Don't add 1.0 to allow for U-shape (bimodal at 0 and 1)
+        # Add small epsilon for stability
+        alpha = nn.Dense(self.action_dim)(x)
+        alpha = nn.softplus(alpha) + 1e-3
+        
+        beta = nn.Dense(self.action_dim)(x)
+        beta = nn.softplus(beta) + 1e-3
+        
+        return alpha, beta
 
-def create_iql_model(observation_dim: int, action_dim: int, hidden_dims=(256, 256)):
+def create_iql_model(observation_dim: int, action_dim: int, hidden_dims=(128, 128)):
     """Helper to initialize model architectures."""
     actor = Actor(hidden_dims, action_dim)
     critic = Critic(hidden_dims)

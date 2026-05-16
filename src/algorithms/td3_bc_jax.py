@@ -20,8 +20,10 @@ def _update_td3_bc_jit(agent, actor_state, critic_state, target_actor_params, ta
     def critic_loss_fn(c_params):
         q1, q2 = critic_state.apply_fn({'params': c_params}, obs, actions)
         
-        # Target Policy Smoothing
-        next_actions = actor_state.apply_fn({'params': target_actor_params}, next_obs)
+        # Target Policy Smoothing (using mean of target actor)
+        alpha_next, beta_next = actor_state.apply_fn({'params': target_actor_params}, next_obs)
+        next_actions = alpha_next / (alpha_next + beta_next)
+        
         # Add small noise to target actions (TD3 trick)
         noise = jax.random.normal(jax.random.PRNGKey(step), next_actions.shape) * 0.2
         next_actions = jnp.clip(next_actions + jnp.clip(noise, -0.5, 0.5), 0.0, 1.0)
@@ -34,22 +36,28 @@ def _update_td3_bc_jit(agent, actor_state, critic_state, target_actor_params, ta
     q_loss, q_grads = jax.value_and_grad(critic_loss_fn)(critic_state.params)
     critic_state = critic_state.apply_gradients(grads=q_grads)
 
-    # 2. Delayed Actor Update
+    # 2. Actor Update
     metrics = {"q_loss": q_loss}
     
-    # In TD3, we update actor every 2 steps
     def actor_loss_fn(a_params):
-        mu = actor_state.apply_fn({'params': a_params}, obs)
+        alpha, beta = actor_state.apply_fn({'params': a_params}, obs)
+        mu = alpha / (alpha + beta)
+        
         q1, q2 = critic_state.apply_fn({'params': critic_state.params}, obs, mu)
         q = jnp.minimum(q1, q2)
         
-        # TD3+BC specific: normalize Q and add BC penalty
+        # TD3+BC specific: normalize Q and add BC penalty (Log-Prob)
         lmbda = agent.alpha / jnp.abs(q).mean()
-        bc_loss = ((mu - actions)**2).mean()
-        return -lmbda * q.mean() + bc_loss
+        
+        # Beta Log-Prob for BC
+        eps = 1e-6
+        actions_clipped = jnp.clip(actions, eps, 1.0 - eps)
+        log_prob = (alpha - 1.0) * jnp.log(actions_clipped) + \
+                   (beta - 1.0) * jnp.log(1.0 - actions_clipped) - \
+                   (jax.scipy.special.gammaln(alpha) + jax.scipy.special.gammaln(beta) - jax.scipy.special.gammaln(alpha + beta))
+        
+        return -lmbda * q.mean() - log_prob.mean()
 
-    # Use a simple conditional for delayed update in JIT
-    # Note: In real training, we might want to pass 'step'
     a_loss, a_grads = jax.value_and_grad(actor_loss_fn)(actor_state.params)
     actor_state = actor_state.apply_gradients(grads=a_grads)
     metrics["a_loss"] = a_loss
@@ -120,3 +128,15 @@ class TD3BCAgent:
             self.actor_state, self.critic_state, self.target_actor_params, self.target_critic_params, metrics = \
                 _update_td3_bc_jit(self, self.actor_state, self.critic_state, self.target_actor_params, self.target_critic_params, batch, self.step)
             return metrics
+
+    def select_action(self, observations):
+        state = self.actor_state
+        if self.n_devices > 1:
+            from flax.training import common_utils
+            state = common_utils.unreplicate(state)
+            
+        if observations.ndim == 1:
+            observations = observations[None, ...]
+            
+        alpha, beta = state.apply_fn({'params': state.params}, observations)
+        return (alpha / (alpha + beta))[0]

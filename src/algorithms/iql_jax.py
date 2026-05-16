@@ -44,16 +44,26 @@ def _update_jit(agent, actor_state, critic_state, value_state, target_critic_par
     q_loss, q_grads = jax.value_and_grad(critic_loss_fn)(critic_state.params)
     critic_state = critic_state.apply_gradients(grads=q_grads)
 
-    # 3. Actor Update (Advantage Weighted Regression)
+    # 3. Actor Update (Advantage Weighted Regression with Beta Distribution)
     def actor_loss_fn(a_params):
         q1, q2 = critic_state.apply_fn({'params': target_critic_params}, obs, actions)
         q = jnp.minimum(q1, q2)
         adv = q - v
         exp_adv = jnp.exp(jnp.minimum(adv * agent.beta, 100.0))
         
-        mu = actor_state.apply_fn({'params': a_params}, obs)
-        # Weighted BC loss
-        a_loss = (exp_adv * (mu - actions)**2).mean()
+        alpha, beta = actor_state.apply_fn({'params': a_params}, obs)
+        
+        # Beta Log-Prob: (alpha-1)log(x) + (beta-1)log(1-x) - logB(alpha, beta)
+        # Clip actions to avoid log(0)
+        eps = 1e-6
+        actions_clipped = jnp.clip(actions, eps, 1.0 - eps)
+        
+        log_prob = (alpha - 1.0) * jnp.log(actions_clipped) + \
+                   (beta - 1.0) * jnp.log(1.0 - actions_clipped) - \
+                   (jax.scipy.special.gammaln(alpha) + jax.scipy.special.gammaln(beta) - jax.scipy.special.gammaln(alpha + beta))
+        
+        # Weighted NLL loss
+        a_loss = -(exp_adv * log_prob).mean()
         return a_loss
 
     a_loss, a_grads = jax.value_and_grad(actor_loss_fn)(actor_state.params)
@@ -145,4 +155,7 @@ class IQLAgent:
             
         if observations.ndim == 1:
             observations = observations[None, ...]
-        return state.apply_fn({'params': state.params}, observations)[0]
+        
+        alpha, beta = state.apply_fn({'params': state.params}, observations)
+        # Return mean of Beta distribution: alpha / (alpha + beta)
+        return (alpha / (alpha + beta))[0]

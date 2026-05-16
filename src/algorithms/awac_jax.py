@@ -30,22 +30,29 @@ def _update_awac_jit(agent, actor_state, critic_state, target_critic_params, bat
     q_loss, q_grads = jax.value_and_grad(critic_loss_fn)(critic_state.params)
     critic_state = critic_state.apply_gradients(grads=q_grads)
 
-    # 2. Actor Update (Advantage Weighted Regression)
+    # 2. Actor Update (Advantage Weighted Regression with Beta Distribution)
     def actor_loss_fn(a_params):
         # Q(s, a) - Q(s, pi(s))
         q1, q2 = critic_state.apply_fn({'params': critic_state.params}, obs, actions)
         q = jnp.minimum(q1, q2)
         
-        v_actions = actor_state.apply_fn({'params': a_params}, obs)
-        v_q1, v_q2 = critic_state.apply_fn({'params': critic_state.params}, obs, v_actions)
+        alpha, beta = actor_state.apply_fn({'params': a_params}, obs)
+        mu = alpha / (alpha + beta)
+        
+        v_q1, v_q2 = critic_state.apply_fn({'params': critic_state.params}, obs, mu)
         v = jnp.minimum(v_q1, v_q2)
         
         adv = q - v
         weight = jnp.exp(jnp.minimum(adv / agent.lam, 100.0))
         
-        mu = actor_state.apply_fn({'params': a_params}, obs)
-        # AWAC is essentially advantage-weighted behavior cloning
-        return (weight * (mu - actions)**2).mean()
+        # Beta Log-Prob for BC
+        eps = 1e-6
+        actions_clipped = jnp.clip(actions, eps, 1.0 - eps)
+        log_prob = (alpha - 1.0) * jnp.log(actions_clipped) + \
+                   (beta - 1.0) * jnp.log(1.0 - actions_clipped) - \
+                   (jax.scipy.special.gammaln(alpha) + jax.scipy.special.gammaln(beta) - jax.scipy.special.gammaln(alpha + beta))
+        
+        return -(weight * log_prob).mean()
 
     a_loss, a_grads = jax.value_and_grad(actor_loss_fn)(actor_state.params)
     actor_state = actor_state.apply_gradients(grads=a_grads)
@@ -111,3 +118,15 @@ class AWACAgent:
             self.actor_state, self.critic_state, self.target_critic_params, metrics = \
                 _update_awac_jit(self, self.actor_state, self.critic_state, self.target_critic_params, batch)
             return metrics
+
+    def select_action(self, observations):
+        state = self.actor_state
+        if self.n_devices > 1:
+            from flax.training import common_utils
+            state = common_utils.unreplicate(state)
+            
+        if observations.ndim == 1:
+            observations = observations[None, ...]
+            
+        alpha, beta = state.apply_fn({'params': state.params}, observations)
+        return (alpha / (alpha + beta))[0]

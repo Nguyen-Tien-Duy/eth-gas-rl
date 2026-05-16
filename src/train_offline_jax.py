@@ -36,8 +36,9 @@ def evaluate_vectorized(agent, params, traces, num_episodes, horizon):
     def scan_fn(carry, _):
         states, obss, total_rewards, total_savings, max_backlogs = carry
         
-        # Get actions from agent
-        actions = actor_state.apply_fn({'params': actor_state.params}, obss)
+        # Get actions from agent (Mean of Beta distribution)
+        alpha, beta = actor_state.apply_fn({'params': actor_state.params}, obss)
+        actions = alpha / (alpha + beta)
         
         v_step = jax.vmap(step_env_jax, in_axes=(0, 0, None, 0, None))
         next_states, rewards, dones, infos = v_step(states, actions, params, traces, horizon)
@@ -75,11 +76,17 @@ def train_offline():
     # 2. Setup Data Loader (PyTorch) - Tăng lên 6 workers để bóc lột 6/8 threads
     print("Loading data with 6 workers...")
     data_dir = f"data/processed/{exp_name}"
+    
+    metadata_path = f"{data_dir}/metadata.json"
+    with open(metadata_path, 'r', encoding='utf-8') as f:
+        metadata = json.load(f)
+    bounds = metadata['normalization_bounds']
+    
     train_loader = get_offline_loader(
         parquet_path=f"{data_dir}/train.parquet",
-        metadata_path=f"{data_dir}/metadata.json",
+        metadata_path=metadata_path,
         batch_size=8192,
-        num_workers=6
+        num_workers=1
     )
     
     # Load validation trace for fast eval
@@ -99,16 +106,39 @@ def train_offline():
     a_scale = config['env'].get('arrival_scale', 0.1)
     val_arr = (val_df['transaction_count'].values.reshape(-1, horizon) * a_scale)
     
+    val_util = val_df['utilization'].values.reshape(-1, horizon)
+    val_mom = val_df['momentum'].values.reshape(-1, horizon)
+    val_acc = val_df['acceleration'].values.reshape(-1, horizon)
+    val_surp = val_df['surprise'].values.reshape(-1, horizon)
+    val_backlog = val_df['backlog_pressure'].values.reshape(-1, horizon)
+    
     traces_jax = TraceData(
         gas_prices=jnp.array(val_gas),
         gas_ref=jnp.array(val_ref),
-        arrivals=jnp.array(val_arr)
+        arrivals=jnp.array(val_arr),
+        utilization=jnp.array(val_util),
+        momentum=jnp.array(val_mom),
+        acceleration=jnp.array(val_acc),
+        surprise=jnp.array(val_surp),
+        backlog_pressure=jnp.array(val_backlog)
     )
     
     env_params = EnvParams(
         c_cap=float(config['env']['execution_capacity']),
-        c_base=21000.0, beta=0.1, alpha=2.0, lambda_d=100.0,
-        min_log_fee=1.0, max_log_fee=10.0, max_queue=1000.0, max_volatility=0.5
+        c_base=float(config['env'].get('C_base', 21000.0)),
+        beta=float(config['env'].get('urgency_beta', 100.0)),
+        alpha=float(config['env'].get('urgency_alpha', 3.0)),
+        lambda_d=float(config['env'].get('deadline_penalty', 5e9)),
+        min_log_fee=bounds['min_log_fee'],
+        max_log_fee=bounds['max_log_fee'],
+        max_queue=bounds['max_queue'],
+        min_momentum=bounds['min_momentum'],
+        max_momentum=bounds['max_momentum'],
+        min_acceleration=bounds['min_acceleration'],
+        max_acceleration=bounds['max_acceleration'],
+        min_surprise=bounds['min_surprise'],
+        max_surprise=bounds['max_surprise'],
+        max_backlog_pressure=bounds['max_backlog_pressure']
     )
 
     # 3. Initialize Agent
@@ -116,15 +146,15 @@ def train_offline():
     print(f"Initializing JAX Agent: {algo_name.upper()}")
     
     if algo_name == 'iql':
-        agent = IQLAgent(observation_dim=9, action_dim=1)
+        agent = IQLAgent(observation_dim=14, action_dim=1)
     elif algo_name == 'cql':
-        agent = CQLAgent(observation_dim=9, action_dim=1)
+        agent = CQLAgent(observation_dim=14, action_dim=1)
     elif algo_name == 'awac':
-        agent = AWACAgent(observation_dim=9, action_dim=1)
+        agent = AWACAgent(observation_dim=14, action_dim=1)
     elif algo_name == 'td3_bc':
-        agent = TD3BCAgent(observation_dim=9, action_dim=1)
+        agent = TD3BCAgent(observation_dim=14, action_dim=1)
     elif algo_name == 'bcq':
-        agent = BCQAgent(observation_dim=9, action_dim=1)
+        agent = BCQAgent(observation_dim=14, action_dim=1)
     else:
         raise ValueError(f"Unsupported JAX algorithm: {algo_name}")
     

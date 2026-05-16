@@ -39,35 +39,59 @@ class GasOfflineDataset(Dataset):
         # 2. Normalize Queue
         norm_queue = (self.df['queue_size'].values / (self.bounds['max_queue'] + 1e-9)).astype(np.float32)
         
-        # 3. Normalize Volatility
-        norm_vol = (self.df['volatility'].values / (self.bounds['max_volatility'] + 1e-9)).astype(np.float32)
-        
-        # 4. Lags (lags_1 to lags_5 in builder.py)
-        num_lags = self.metadata['config']['state']['num_lags']
-        lag_cols = [f'lag_{i+1}' for i in range(num_lags)]
-        lags = self.df[lag_cols].values.astype(np.float32)
-        norm_lags = (lags - self.bounds['min_log_fee']) / (self.bounds['max_log_fee'] - self.bounds['min_log_fee'] + 1e-9)
-        
-        # 5. Time Ratio (Fix: Calculate on-the-fly if missing in parquet)
+        # 3. Time Ratio (Fix: Calculate on-the-fly if missing in parquet)
         if 'time_ratio' not in self.df.columns:
             H = self.metadata['config']['env'].get('horizon', 128)
             time_ratio = (self.df.groupby('episode_id').cumcount() / (H - 1)).astype(np.float32).values
         else:
             time_ratio = self.df['time_ratio'].values.astype(np.float32)
             
-        # 6. Normalize Actions (% of Queue)
+        # 4. Utilization (already bounded roughly [0, 1])
+        utilization = self.df['utilization'].values.astype(np.float32)
+        
+        # 5. Momentum, Acceleration, Surprise, Backlog, Gas Ref
+        def min_max(val, b_min, b_max):
+            return (val - b_min) / (b_max - b_min + 1e-9)
+            
+        momentum = self.df['momentum'].values.astype(np.float32)
+        norm_momentum = min_max(momentum, self.bounds['min_momentum'], self.bounds['max_momentum'])
+        
+        acceleration = self.df['acceleration'].values.astype(np.float32)
+        norm_accel = min_max(acceleration, self.bounds['min_acceleration'], self.bounds['max_acceleration'])
+        
+        surprise = self.df['surprise'].values.astype(np.float32)
+        norm_surprise = min_max(surprise, self.bounds['min_surprise'], self.bounds['max_surprise'])
+        
+        backlog = self.df['backlog_pressure'].values.astype(np.float32)
+        norm_backlog = min_max(backlog, 0.0, self.bounds['max_backlog_pressure'])
+        
+        log_gas_ref = np.log(self.df['gas_reference'].values.astype(np.float32) + 1e-9)
+        norm_gas_ref = min_max(log_gas_ref, self.bounds['min_log_fee'], self.bounds['max_log_fee'])
+        
+        # 6. Lags (5 lags)
+        num_lags = self.metadata['config']['state']['num_lags']
+        lag_cols = [f'lag_{i+1}' for i in range(num_lags)]
+        lags = self.df[lag_cols].values.astype(np.float32)
+        norm_lags = (lags - self.bounds['min_log_fee']) / (self.bounds['max_log_fee'] - self.bounds['min_log_fee'] + 1e-9)
+        
+        # 7. Normalize Actions (% of Queue)
         raw_actions = self.df['action'].values
         queue_vals = self.df['queue_size'].values
         norm_actions = np.where(queue_vals > 1e-6, raw_actions / (queue_vals + 1e-9), 0.0)
         self.actions = np.clip(norm_actions, 0.0, 1.0).astype(np.float32)
         
-        # Combine into Observation Matrix
+        # Combine into 14-D Observation Matrix
         self.obs_matrix = np.column_stack([
-            norm_queue,
-            norm_fee,
-            norm_vol,
-            norm_lags,
-            time_ratio
+            norm_queue,         # 1
+            norm_fee,           # 2
+            norm_lags,          # 3-7 (5 lags)
+            time_ratio,         # 8
+            utilization,        # 9
+            norm_momentum,      # 10
+            norm_accel,         # 11
+            norm_surprise,      # 12
+            norm_backlog,       # 13
+            norm_gas_ref        # 14
         ]).astype(np.float32)
         
         # Targets
